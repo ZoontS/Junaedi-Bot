@@ -37,7 +37,7 @@ safety_settings = [
 ]
 
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash-latest",
+    model_name="gemini-1.5-flash",
     safety_settings=safety_settings,
     generation_config=generation_config,
     system_instruction="Your name is Junaedi. You are an AI assistant made by Zoont",
