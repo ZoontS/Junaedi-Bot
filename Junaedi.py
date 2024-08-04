@@ -65,6 +65,8 @@ token_counter = tiktoken.get_encoding("cl100k_base")
 
 if not os.path.isdir("Files"):
     os.makedirs("Files")
+if not os.path.isdir("Logs"):
+    os.makedirs("Logs")
 
 max_tokens = 16384
 message_size = 1950
