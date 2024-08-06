@@ -150,10 +150,7 @@ async def on_message(message):
             max_tokens=2048,
         )
 
-        # print(f"Message:\n{message.author}: {content}")
-        # print(f"Response:\n{response.choices[0].message.content}")
-
-        print(response, end="\n\n")
+        logging.debug(f"AI Response: {response}")
 
         if len(response.choices[0].message.content) > message_size:
             for chunk in split_string_into_chunks(response.choices[0].message.content, message_size):
@@ -168,4 +165,4 @@ handler = logging.handlers.RotatingFileHandler(
     backupCount=7,
 )
 
-bot.run(discord_token, log_handler=handler, log_level=logging.DEBUG)
+bot.run(discord_token, log_handler=handler, log_level=logging.DEBUG, root_logger=True)

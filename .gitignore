@@ -8,3 +8,4 @@ tokens.py
 secrets.py
 /Logs
 /Files
+*.log
