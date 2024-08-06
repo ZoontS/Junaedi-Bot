@@ -98,6 +98,14 @@ async def reset_chat(interaction: discord.Interaction):
     ]
     await interaction.response.send_message(content=f"Chat history has been reset")
 
+@bot.tree.command(name="play", description="Plays an audio by providing a URL. Also supports extracing audio from a video")
+@discord.app_commands.describe(query="Provide URL")
+@discord.app_commands.rename(query="input")
+@discord.app_commands.guild_only()
+async def play(interaction: discord.Interaction, query: str):
+    await interaction.user.voice.channel.connect(self_deaf=True)
+    await interaction.response.send_message(content="u stupid", ephemeral=True)
+
 @bot.event
 async def on_message(message):
     if message.author == bot.user:
