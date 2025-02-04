@@ -11,8 +11,7 @@ import textract
 import tiktoken
 from discord.ext import commands, tasks
 from yt_dlp import YoutubeDL
-
-from Tokens import *
+from dotenv import load_dotenv
 
 
 def split_string_into_chunks(s, chunk_size):
@@ -87,8 +86,12 @@ async def download_media(query):
     return output.stdout
 
 
+load_dotenv()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+DISCORD_API_KEY = os.getenv("DISCORD_API_KEY")
+
 ai_client = openai.OpenAI(
-    api_key=groq_token,
+    api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1",
 )
 
@@ -238,4 +241,4 @@ handler = logging.handlers.RotatingFileHandler(
     backupCount=7,
 )
 
-bot.run(discord_token, log_handler=handler, log_level=logging.DEBUG, root_logger=True)
+bot.run(DISCORD_API_KEY, log_handler=handler, log_level=logging.DEBUG, root_logger=True)

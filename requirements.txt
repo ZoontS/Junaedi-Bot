@@ -4,3 +4,4 @@ requests == 2.*
 textract == 1.*
 tiktoken == 0.*
 yt-dlp == 2025.*
+python-dotenv == 1.*
