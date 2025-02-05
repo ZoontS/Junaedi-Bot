@@ -95,7 +95,7 @@ ai_client = openai.OpenAI(
     base_url="https://api.groq.com/openai/v1",
 )
 
-f = open("System Prompt.txt", "r")
+f = open("Prompts/System Prompt.txt", "r")
 system_prompt_base = f.read()
 f.close()
 
