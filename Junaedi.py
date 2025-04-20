@@ -3,6 +3,7 @@ import logging
 import logging.handlers
 import os
 import subprocess
+import re
 
 import discord
 import openai
@@ -10,16 +11,17 @@ import requests
 import textract
 import tiktoken
 from discord.ext import commands, tasks
+from discord import app_commands
 from yt_dlp import YoutubeDL
 from dotenv import load_dotenv
 
 
-def split_string_into_chunks(s, chunk_size):
+async def split_string_into_chunks(s, chunk_size):
     for i in range(0, len(s), chunk_size):
         yield s[i : i + chunk_size]
 
 
-def count_tokens_from_conversation(conversation):
+async def count_tokens_from_conversation(conversation):
     tokens_per_message = 4
     num_tokens = 0
     for message in conversation:
@@ -29,7 +31,7 @@ def count_tokens_from_conversation(conversation):
     return num_tokens
 
 
-def truncate_conversation(conversation):
+async def truncate_conversation(conversation):
     removed_indices = []
     for idx, message in enumerate(conversation):
         if idx == 0:
@@ -43,7 +45,7 @@ def truncate_conversation(conversation):
     return conversation
 
 
-def download_file(url, filename):
+async def download_file(url, filename):
     filepath = f"Files/{filename}"
     response = requests.get(url, stream=True)
     if response.status_code == 200:
@@ -95,9 +97,8 @@ ai_client = openai.OpenAI(
     base_url="https://api.groq.com/openai/v1",
 )
 
-f = open("Prompts/System Prompt.txt", "r")
-system_prompt_base = f.read()
-f.close()
+with open("Prompts/System Prompt.txt", "r", encoding="utf-8") as f:
+    system_prompt_base = f.read()
 
 token_counter = tiktoken.get_encoding("cl100k_base")
 
@@ -115,18 +116,44 @@ intents.message_content = True
 intents.members = True
 # intents.presences = True
 
-bot = commands.Bot(command_prefix=None, intents=intents)
+username_pattern = r'<@([a-zA-Z0-9_.]+)>'
 
+bot = commands.Bot(command_prefix=None, intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f"We have logged in as {bot.user}")
+    print(f"Logged in as {bot.user}")
+    logging.info(f"Logged in as {bot.user}")
+    # try:
+    #     synced_commands = await bot.tree.sync()
+    #     print(f"Synced {len(synced_commands)} commands")
+    #     logging.info(f"Synced {len(synced_commands)} commands")
+    # except Exception as error:
+    #     print(f"ERROR syncing commands: {error}")
+    #     logging.error(f"ERROR syncing commands: {error}")
+
+dev_commands = app_commands.Group(name="debug", description="Debug commands for develoment purposes only")
+
+@dev_commands.command(name="sync-commands", description="Debug command for develoment purposes only")
+async def sync_commands(interaction: discord.Interaction):
     try:
         synced_commands = await bot.tree.sync()
         print(f"Synced {len(synced_commands)} commands")
+        logging.info(f"Synced {len(synced_commands)} commands")
+        await interaction.response.send_message(content="Done", ephemeral=True)
     except Exception as error:
         print(f"ERROR syncing commands: {error}")
+        logging.error(f"ERROR syncing commands: {error}")
+        await interaction.response.send_message(content="Error syncing commands", ephemeral=True)
 
+@dev_commands.command(name="list-servers", description="Debug command for develoment purposes only")
+async def list_servers(interaction: discord.Interaction):
+    servers = bot.guilds
+    print(f"List of joined servers: \n{servers}")
+    logging.debug(f"List of joined servers: \n{servers}")
+    await interaction.response.send_message(content="Done", ephemeral=True)
+
+bot.tree.add_command(dev_commands)
 
 @bot.tree.command(name="reset-chat", description="Resets chat history for AI responses")
 async def reset_chat(interaction: discord.Interaction):
@@ -166,7 +193,7 @@ async def on_message(message):
         return
 
     if bot.user in message.mentions:
-        current_date = datetime.datetime.now().strftime("%A, %B %d, %Y")
+        current_date = datetime.datetime.today().strftime("%A, %d %B %Y")
         system_prompt = system_prompt_base.format(current_date=current_date)
 
         if message.guild.id not in conversation_history:
@@ -187,7 +214,8 @@ async def on_message(message):
                 )
                 os.remove(attachment_filename)
             except Exception as error:
-                print(f"ERROR processing attachment: {error}")
+                print(f"Error processing attachment: {error}")
+                logging.error(f"Error processing attachment: {error}")
         if message.attachments:
             conversation_history[message.guild.id].append(
                 {"role": "system", "content": file_attachment_prompt}
@@ -198,46 +226,56 @@ async def on_message(message):
 
         for user in message.mentions:
             mention_str = f"<@{user.id}>"
-            username_str = f"@{user.name}"
+            username_str = f"<@{user.name}>"
             content = content.replace(mention_str, username_str)
 
         conversation_history[message.guild.id].append(
             {"role": "user", "name": author, "content": content}
         )
 
-        total_tokens = count_tokens_from_conversation(
+        total_tokens = await count_tokens_from_conversation(
             conversation_history[message.guild.id]
         )
         while total_tokens > max_tokens:
-            conversation_history[message.guild.id] = truncate_conversation(
+            conversation_history[message.guild.id] = await truncate_conversation(
                 conversation_history[message.guild.id]
             )
-            total_tokens = count_tokens_from_conversation(
+            total_tokens = await count_tokens_from_conversation(
                 conversation_history[message.guild.id]
             )
 
         response = ai_client.chat.completions.create(
-            model="llama-3.1-70b-versatile",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=conversation_history[message.guild.id],
             temperature=0.7,
-            max_tokens=2048,
+            top_p=0.95,
+            max_tokens=768,
         )
-
         logging.debug(f"AI Response: {response}")
 
-        if len(response.choices[0].message.content) > message_size:
-            for chunk in split_string_into_chunks(
-                response.choices[0].message.content, message_size
+        current_response = response.choices[0].message.content
+        conversation_history[message.guild.id].append(
+            {"role": "assistant", "name": "Junaedi", "content": current_response}
+        )
+
+        username_matches = re.findall(username_pattern, current_response)
+        for username in username_matches:
+            user_id = message.guild.get_member_named(username).id
+            current_response = current_response.replace(f"<@{username}>", f"<@{user.id}>")
+
+        if len(current_response) > message_size:
+            async for chunk in split_string_into_chunks(
+                current_response, message_size
             ):
                 await message.channel.send(chunk)
         else:
-            await message.channel.send(response.choices[0].message.content)
+            await message.channel.send(current_response)
 
 
 handler = logging.handlers.RotatingFileHandler(
-    filename="Logs/discord.log",
+    filename="Logs/junaedi.log",
     encoding="utf-8",
-    maxBytes=1024 * 1024 * 8,  # x MiB
+    maxBytes=1024 * 1024 * 16,  # MiB
     backupCount=7,
 )
 
