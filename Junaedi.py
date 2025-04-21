@@ -6,10 +6,12 @@ import subprocess
 import re
 
 import discord
-import openai
 import requests
 import textract
 import tiktoken
+from pydantic_ai import Agent
+from pydantic_ai.settings import ModelSettings
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 from discord.ext import commands, tasks
 from discord import app_commands
 from yt_dlp import YoutubeDL
@@ -31,17 +33,40 @@ async def count_tokens_from_conversation(conversation):
     return num_tokens
 
 
-async def truncate_conversation(conversation):
-    removed_indices = []
+async def remove_old_messages(
+    conversation: list[ModelMessage], max_age: int
+) -> list[ModelMessage]:
+    indices_to_remove = []
     for idx, message in enumerate(conversation):
-        if idx == 0:
-            continue
-        removed_indices.append(idx)
-        if message["role"] == "assistant":
-            break
-    removed_indices.reverse()
-    for i in removed_indices:
+        if (
+            isinstance(message, ModelRequest)
+            and (
+                datetime.datetime.now(datetime.timezone.utc)
+                - message.parts[0].timestamp
+            ).days
+            >= max_age
+        ):
+            indices_to_remove.append(idx)
+        elif (
+            isinstance(message, ModelResponse)
+            and (datetime.datetime.now(datetime.timezone.utc) - message.timestamp).days
+            >= max_age
+        ):
+            indices_to_remove.append(idx)
+    indices_to_remove.reverse()
+    for i in indices_to_remove:
         conversation.pop(i)
+    return conversation
+
+
+async def truncate_conversation(
+    conversation: list[ModelMessage], max_messages: int, max_age: int
+) -> list[ModelMessage]:
+    conversation = await remove_old_messages(conversation, max_age)
+    while len(conversation) > max_messages:
+        conversation.pop(0)
+        while isinstance(conversation[0], ModelResponse):
+            conversation.pop(0)
     return conversation
 
 
@@ -57,7 +82,7 @@ async def download_file(url, filename):
     else:
         print(f"Failed to download file. Status code: {response.status_code}")
         return None
-    
+
 
 async def download_media(query):
     output = subprocess.run(
@@ -92,13 +117,28 @@ load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 DISCORD_API_KEY = os.getenv("DISCORD_API_KEY")
 
-ai_client = openai.OpenAI(
-    api_key=GROQ_API_KEY,
-    base_url="https://api.groq.com/openai/v1",
+model_settings = ModelSettings(
+    max_tokens=768,
+    temperature=0.7,
+    top_p=0.95,
+)
+agent = Agent(
+    model="groq:meta-llama/llama-4-scout-17b-16e-instruct",
+    model_settings=model_settings,
 )
 
 with open("Prompts/System Prompt.txt", "r", encoding="utf-8") as f:
     system_prompt_base = f.read()
+
+
+@agent.instructions
+def add_instructions() -> str:
+    return system_prompt_base.format(
+        current_date=datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%A, %d %B %Y"
+        )
+    )
+
 
 token_counter = tiktoken.get_encoding("cl100k_base")
 
@@ -109,6 +149,9 @@ if not os.path.isdir("Logs"):
 
 max_tokens = 16384
 message_size = 1950
+max_messages = 40  # Maximum amount of messages kept in conversation history, including AI responses
+max_message_age = 2  # Days
+attachment_max_chars = 10000
 conversation_history = {}
 
 intents = discord.Intents.default()
@@ -116,9 +159,11 @@ intents.message_content = True
 intents.members = True
 # intents.presences = True
 
-username_pattern = r'<@([a-zA-Z0-9_.]+)>'
+username_pattern1 = r"<@([a-zA-Z0-9_.]+)>"
+username_pattern2 = r"@<([a-zA-Z0-9_.]+)>"
 
 bot = commands.Bot(command_prefix=None, intents=intents)
+
 
 @bot.event
 async def on_ready():
@@ -132,9 +177,15 @@ async def on_ready():
     #     print(f"ERROR syncing commands: {error}")
     #     logging.error(f"ERROR syncing commands: {error}")
 
-dev_commands = app_commands.Group(name="debug", description="Debug commands for develoment purposes only")
 
-@dev_commands.command(name="sync-commands", description="Debug command for develoment purposes only")
+dev_commands = app_commands.Group(
+    name="debug", description="Debug commands for development purposes only"
+)
+
+
+@dev_commands.command(
+    name="sync-commands", description="Debug command for development purposes only"
+)
 async def sync_commands(interaction: discord.Interaction):
     try:
         synced_commands = await bot.tree.sync()
@@ -144,25 +195,27 @@ async def sync_commands(interaction: discord.Interaction):
     except Exception as error:
         print(f"ERROR syncing commands: {error}")
         logging.error(f"ERROR syncing commands: {error}")
-        await interaction.response.send_message(content="Error syncing commands", ephemeral=True)
+        await interaction.response.send_message(
+            content="Error syncing commands", ephemeral=True
+        )
 
-@dev_commands.command(name="list-servers", description="Debug command for develoment purposes only")
+
+@dev_commands.command(
+    name="list-servers", description="Debug command for development purposes only"
+)
 async def list_servers(interaction: discord.Interaction):
     servers = bot.guilds
     print(f"List of joined servers: \n{servers}")
     logging.debug(f"List of joined servers: \n{servers}")
     await interaction.response.send_message(content="Done", ephemeral=True)
 
+
 bot.tree.add_command(dev_commands)
+
 
 @bot.tree.command(name="reset-chat", description="Resets chat history for AI responses")
 async def reset_chat(interaction: discord.Interaction):
-    current_date = datetime.datetime.now().strftime("%A, %B %d, %Y")
-    system_prompt = system_prompt_base.format(current_date=current_date)
-
-    conversation_history[interaction.guild.id] = [
-        {"role": "system", "content": system_prompt}
-    ]
+    conversation_history[interaction.guild.id] = []
     await interaction.response.send_message(content=f"Chat history has been reset")
 
 
@@ -175,7 +228,9 @@ async def reset_chat(interaction: discord.Interaction):
 async def play(interaction: discord.Interaction, query: str):
     await interaction.response.defer(ephemeral=True, thinking=True)
     if not interaction.user.voice:
-        await interaction.followup.send(content="u stupid (masuk voice channel dulu kocag)", ephemeral=True)
+        await interaction.followup.send(
+            content="u stupid (masuk voice channel dulu kocag)", ephemeral=True
+        )
         return
     if not discord.utils.get(bot.voice_clients, guild=interaction.guild):
         await interaction.user.voice.channel.connect(self_deaf=True)
@@ -193,33 +248,9 @@ async def on_message(message):
         return
 
     if bot.user in message.mentions:
-        current_date = datetime.datetime.today().strftime("%A, %d %B %Y")
-        system_prompt = system_prompt_base.format(current_date=current_date)
 
         if message.guild.id not in conversation_history:
-            conversation_history[message.guild.id] = [
-                {"role": "system", "content": system_prompt}
-            ]
-
-        if message.attachments:
-            file_attachment_prompt = "User uploaded the following file:"
-        for attachments in message.attachments:
-            try:
-                attachment_filepath, attachment_filename = await download_file(
-                    url=attachments.url, filename=attachments.filename
-                )
-                attached_text = textract.process(attachment_filepath)
-                file_attachment_prompt += (
-                    f"\n\nFilename: {attachment_filename}\nContent: {attached_text}"
-                )
-                os.remove(attachment_filename)
-            except Exception as error:
-                print(f"Error processing attachment: {error}")
-                logging.error(f"Error processing attachment: {error}")
-        if message.attachments:
-            conversation_history[message.guild.id].append(
-                {"role": "system", "content": file_attachment_prompt}
-            )
+            conversation_history[message.guild.id] = []
 
         author = str(message.author)
         content = f"{author}: {message.content}"
@@ -229,44 +260,54 @@ async def on_message(message):
             username_str = f"<@{user.name}>"
             content = content.replace(mention_str, username_str)
 
-        conversation_history[message.guild.id].append(
-            {"role": "user", "name": author, "content": content}
+        if message.attachments:
+            file_attachment_prompt = f"{author} uploaded the following file:"
+        for attachments in message.attachments:
+            try:
+                attachment_filepath, attachment_filename = await download_file(
+                    url=attachments.url, filename=attachments.filename
+                )
+                attached_text = textract.process(attachment_filepath)
+                file_attachment_prompt += f"\nFilename: {attachment_filename}\nContent: {attached_text[:attachment_max_chars]}"
+                # os.remove(attachment_filename)
+            except Exception as error:
+                print(f"Error processing attachment: {error}")
+                logging.error(f"Error processing attachment: {error}")
+
+        current_request = []
+        if message.attachments:
+            current_request.append(file_attachment_prompt)
+        current_request.append(content)
+        conversation_history[message.guild.id] = await truncate_conversation(
+            conversation_history[message.guild.id], max_messages, max_message_age
         )
 
-        total_tokens = await count_tokens_from_conversation(
-            conversation_history[message.guild.id]
+        response = await agent.run(
+            current_request, message_history=conversation_history[message.guild.id]
         )
-        while total_tokens > max_tokens:
-            conversation_history[message.guild.id] = await truncate_conversation(
-                conversation_history[message.guild.id]
-            )
-            total_tokens = await count_tokens_from_conversation(
-                conversation_history[message.guild.id]
-            )
+        logging.debug(f"New response: {response.output}")
 
-        response = ai_client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=conversation_history[message.guild.id],
-            temperature=0.7,
-            top_p=0.95,
-            max_tokens=768,
-        )
-        logging.debug(f"AI Response: {response}")
+        conversation_history[message.guild.id].extend(response.new_messages())
 
-        current_response = response.choices[0].message.content
-        conversation_history[message.guild.id].append(
-            {"role": "assistant", "name": "Junaedi", "content": current_response}
-        )
+        current_response = response.output
 
-        username_matches = re.findall(username_pattern, current_response)
+        username_matches = re.findall(username_pattern1, current_response)
         for username in username_matches:
             user_id = message.guild.get_member_named(username).id
-            current_response = current_response.replace(f"<@{username}>", f"<@{user.id}>")
+            current_response = current_response.replace(
+                f"<@{username}>", f"<@{user_id}>"
+            )
+
+        # We use 2 regex patterns because llms are stupid and they sometimes do @<username> instead of <@username>
+        username_matches = re.findall(username_pattern2, current_response)
+        for username in username_matches:
+            user_id = message.guild.get_member_named(username).id
+            current_response = current_response.replace(
+                f"@<{username}>", f"<@{user_id}>"
+            )
 
         if len(current_response) > message_size:
-            async for chunk in split_string_into_chunks(
-                current_response, message_size
-            ):
+            async for chunk in split_string_into_chunks(current_response, message_size):
                 await message.channel.send(chunk)
         else:
             await message.channel.send(current_response)
